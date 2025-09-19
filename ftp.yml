@@ -1,0 +1,105 @@
+---
+- name: Secure FTP (vsftpd) | FTP 보안 서버 구축
+  hosts: ftphosts
+  become: true
+  vars:
+    listen_port: 2121
+    pasv_min_port: 30000
+    pasv_max_port: 30100
+    ftp_allowed_users: ["fedora"]
+
+  pre_tasks:
+    - name: Install firewalld | 방화벽 패키지 설치
+      ansible.builtin.dnf:
+        name: firewalld
+        state: present
+
+    - name: Enable & start firewalld | 방화벽 서비스 활성화 및 시작
+      ansible.builtin.systemd:
+        name: firewalld
+        enabled: true
+        state: started
+
+  tasks:
+    - name: Install vsftpd packages | FTP 서버 패키지 설치
+      ansible.builtin.dnf:
+        name: [vsftpd, ftp]
+        state: present
+
+    - name: Configure /etc/vsftpd/vsftpd.conf | FTP 설정 파일 구성
+      ansible.builtin.blockinfile:
+        path: /etc/vsftpd/vsftpd.conf
+        create: true
+        block: |
+          listen=YES
+          listen_ipv6=NO
+          anonymous_enable=NO
+          local_enable=YES
+          write_enable=YES
+          xferlog_enable=YES
+          listen_port={{ listen_port }}
+          idle_session_timeout=600
+          data_connection_timeout=120
+          pasv_enable=YES
+          pasv_min_port={{ pasv_min_port }}
+          pasv_max_port={{ pasv_max_port }}
+          chroot_local_user=YES
+          allow_writeable_chroot=YES
+          chroot_list_enable=YES
+          chroot_list_file=/etc/vsftpd/chroot_list
+          userlist_enable=YES
+          userlist_deny=NO
+          userlist_file=/etc/vsftpd/user_list
+      notify: Restart vsftpd
+
+    - name: Allow-list (/etc/vsftpd/user_list) | FTP 허용 사용자 목록 생성
+      ansible.builtin.copy:
+        dest: /etc/vsftpd/user_list
+        mode: "0644"
+        content: |
+          {% for u in ftp_allowed_users %}{{ u }}
+          {% endfor %}
+      notify: Restart vsftpd
+
+    - name: Ensure chroot_list exists | 사용자 chroot 리스트 파일 생성
+      ansible.builtin.copy:
+        dest: /etc/vsftpd/chroot_list
+        mode: "0644"
+        content: ""
+      notify: Restart vsftpd
+
+    - name: Open firewall (custom & passive range) | 방화벽에 FTP 포트 개방
+      ansible.posix.firewalld:
+        port: "{{ item }}"
+        permanent: true
+        immediate: true
+        state: enabled
+      loop:
+        - "{{ listen_port }}/tcp"
+        - "{{ pasv_min_port }}-{{ pasv_max_port }}/tcp"
+
+    - name: Enable & start vsftpd | FTP 서비스 활성화 및 시작
+      ansible.builtin.systemd:
+        name: vsftpd
+        enabled: true
+        state: started
+
+    - name: Check service active | FTP 서비스 동작 상태 확인
+      ansible.builtin.systemd:
+        name: vsftpd
+      register: svc
+      changed_when: false
+      failed_when: svc.status.ActiveState != "active"
+
+    - name: Check listening port | 2121 포트 리스닝 상태 확인
+      ansible.builtin.shell: "ss -ltn '( sport = :{{ listen_port }} )' | tail -n +2 | wc -l"
+      register: listen_count
+      changed_when: false
+      failed_when: listen_count.stdout | int < 1
+
+  handlers:
+    - name: Restart vsftpd | FTP 서비스 재시작
+      ansible.builtin.systemd:
+        name: vsftpd
+        state: restarted
+
